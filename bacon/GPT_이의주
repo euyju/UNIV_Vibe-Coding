@@ -1,0 +1,191 @@
+import requests
+import urllib.parse
+import time
+import re
+from html.parser import HTMLParser
+from collections import deque, defaultdict
+
+BASE_URL = "https://www.imdb.com"
+SLEEP_SEC = 1.5
+MAX_DEPTH = 2
+MAX_FILMS = 10
+
+# ✅ 캐시
+movie_cast_cache = {}
+
+# ✅ 요청 함수 (requests 사용)
+def fetch_html(url):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.text
+        return ""
+    except:
+        return ""
+
+# ✅ 배우 ID 추출 파서
+class ActorIDParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.actor_url = None
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if self.found:
+            return
+        attrs = dict(attrs)
+        if tag == 'a' and attrs.get('href', '').startswith('/name/nm'):
+            self.actor_url = attrs['href']
+            self.found = True
+
+# ✅ 영화 ID 추출 파서
+class FilmParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.films = []
+        self.seen = set()
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        href = attrs.get('href', '')
+        match = re.match(r'/title/(tt\d+)/', href)
+        if tag == 'a' and match:
+            fid = match.group(1)
+            if fid not in self.seen:
+                self.films.append(fid)
+                self.seen.add(fid)
+
+# ✅ 영화 출연 배우 파서
+class CastParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.actors = []
+        self.in_cast = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        href = attrs.get('href', '')
+        if tag == 'a' and re.match(r'/name/nm\d+/', href):
+            self.in_cast = True
+
+    def handle_data(self, data):
+        if self.in_cast:
+            name = data.strip()
+            if name:
+                self.actors.append(name)
+            self.in_cast = False
+
+# ✅ 배우 이름으로 IMDb ID 얻기
+def get_actor_id(name):
+    query = urllib.parse.quote(name)
+    url = f"{BASE_URL}/find?q={query}&s=nm"
+    html = fetch_html(url)
+    parser = ActorIDParser()
+    parser.feed(html)
+    return parser.actor_url if parser.actor_url else None
+
+# ✅ 배우 출연 영화 목록
+def get_actor_films(actor_url):
+    url = f"{BASE_URL}{actor_url}"
+    html = fetch_html(url)
+    parser = FilmParser()
+    parser.feed(html)
+    return parser.films[:MAX_FILMS]
+
+# ✅ 영화 ID로 출연 배우 목록
+def get_movie_cast(movie_id):
+    if movie_id in movie_cast_cache:
+        return movie_cast_cache[movie_id]
+
+    url = f"{BASE_URL}/title/{movie_id}/fullcredits"
+    html = fetch_html(url)
+    parser = CastParser()
+    parser.feed(html)
+    movie_cast_cache[movie_id] = parser.actors
+    return parser.actors
+
+# ✅ 그래프 구성 (최대 2단계)
+def build_graph(start_actor):
+    graph = defaultdict(list)
+    visited_actors = set()
+    visited_movies = set()
+    queue = deque([(start_actor, 0)])
+
+    while queue:
+        actor, depth = queue.popleft()
+        if depth > MAX_DEPTH or actor in visited_actors:
+            continue
+        visited_actors.add(actor)
+
+        actor_url = get_actor_id(actor)
+        if not actor_url:
+            continue
+        time.sleep(SLEEP_SEC)
+
+        films = get_actor_films(actor_url)
+        for movie_id in films:
+            if movie_id in visited_movies:
+                continue
+            visited_movies.add(movie_id)
+            time.sleep(SLEEP_SEC)
+
+            cast = get_movie_cast(movie_id)
+            for co_actor in cast:
+                if co_actor == actor:
+                    continue
+                graph[actor].append((co_actor, movie_id))
+                graph[co_actor].append((actor, movie_id))
+                if co_actor not in visited_actors:
+                    queue.append((co_actor, depth + 1))
+    return graph
+
+# ✅ BFS 최단 경로 탐색
+def find_connection_path(graph, start, end):
+    visited = set()
+    queue = deque([[start]])
+
+    while queue:
+        path = queue.popleft()
+        actor = path[-1]
+        if actor == end:
+            return path
+        if actor in visited:
+            continue
+        visited.add(actor)
+        for neighbor, _ in graph.get(actor, []):
+            if neighbor not in visited:
+                queue.append(path + [neighbor])
+    return None
+
+# ✅ 경로 출력
+def print_path_with_movies(graph, path):
+    print("\n경로:")
+    for i in range(len(path) - 1):
+        a1, a2 = path[i], path[i+1]
+        for neighbor, movie_id in graph[a1]:
+            if neighbor == a2:
+                print(f"{a1} → {a2} (https://www.imdb.com/title/{movie_id}/)")
+                break
+    print(f"\n거리: {len(path) - 1}단계")
+
+# ✅ 메인
+def main():
+    actor1 = input("▶ 배우1: ").strip()
+    actor2 = input("▶ 배우2: ").strip()
+
+    print(f"\n[그래프 생성 중: {actor1} 기준]")
+    graph = build_graph(actor1)
+
+    if actor2 not in graph:
+        print("\n두 배우 사이의 연결 경로를 찾을 수 없습니다.")
+        return
+
+    path = find_connection_path(graph, actor1, actor2)
+    if path:
+        print_path_with_movies(graph, path)
+    else:
+        print("\n연결 경로 없음.")
+
+if __name__ == "__main__":
+    main()
